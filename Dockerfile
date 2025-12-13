@@ -17,15 +17,16 @@ COPY backend/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code
-COPY backend/ ./backend/
+# Copy backend code (including app/data directory)
+COPY backend/app/ ./backend/app/
+COPY backend/requirements.txt ./backend/requirements.txt
 WORKDIR /app/backend
 
 # Create data directory
 RUN mkdir -p /app/backend/data
 
 # Set PYTHONPATH so Python can find the app module
-ENV PYTHONPATH=/app/backend
+ENV PYTHONPATH=/app/backend:$PYTHONPATH
 
 # Expose port (Render sets PORT env var)
 EXPOSE ${PORT:-8000}
