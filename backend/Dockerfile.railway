@@ -30,14 +30,15 @@ RUN echo "=== Checking app structure ===" && \
 # Set PYTHONPATH so Python can find the app module
 ENV PYTHONPATH=/app
 
-# Expose port (Render default is 10000, but PORT env var will be set)
-EXPOSE ${PORT:-10000}
+# Expose port (Render sets PORT env var, default to 8000 to match render.yaml)
+EXPOSE 8000
 
-# Health check
+# Health check (PORT will be set by Render at runtime)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-10000}/api/health || exit 1
+    CMD ["sh", "-c", "curl -f http://localhost:${PORT:-8000}/api/health || exit 1"]
 
 # Run the application
-# Render sets PORT env var (default 10000), bind to 0.0.0.0 as required
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-10000}
+# Render sets PORT env var, bind to 0.0.0.0 as required
+# Use shell form to expand PORT environment variable
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
