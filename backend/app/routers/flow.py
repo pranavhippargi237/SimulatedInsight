@@ -245,3 +245,4 @@ async def get_patient_flow_sankey(
     except Exception as e:
         logger.error(f"Flow analysis failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+

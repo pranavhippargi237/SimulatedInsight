@@ -167,3 +167,5 @@ async def get_latest_bottlenecks():
     # If no cache, run detection
     return await detect_bottlenecks(window_hours=24, top_n=3)
 
+
+

@@ -130,3 +130,4 @@ async def get_comprehensive_insights(window_hours: int = 48, horizon_hours: int 
     except Exception as e:
         logger.error(f"Comprehensive insights failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+

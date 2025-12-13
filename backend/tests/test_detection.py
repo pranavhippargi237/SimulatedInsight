@@ -47,3 +47,4 @@ def test_bottleneck_schema():
     assert bottleneck.impact_score == 0.5
     assert bottleneck.severity == "medium"
 
+

@@ -101,3 +101,4 @@ export default function SHAPHeatmap({ shapData, featureNames }) {
     </div>
   )
 }
+

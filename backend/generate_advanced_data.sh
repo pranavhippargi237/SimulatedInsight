@@ -34,3 +34,4 @@ echo "1. The file is saved inside the Docker container at /app/sample_data.csv"
 echo "2. Upload it via the frontend Chat page (Upload CSV Data button)"
 echo "3. Or copy it to your host: docker compose cp backend:/app/sample_data.csv ./sample_data_advanced.csv"
 
+

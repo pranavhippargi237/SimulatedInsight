@@ -110,3 +110,4 @@ If insights still don't appear:
 2. Verify backend logs for analysis errors
 3. Try specific queries: "What are my bottlenecks?" or "Analyze LWBS"
 4. Check browser console for frontend errors
+

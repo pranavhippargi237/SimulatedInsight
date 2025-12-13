@@ -31,9 +31,12 @@ export default function Dashboard() {
           }
         }
       } catch (error) {
-        // Check if it's a network error
+        // Check if it's a network error or timeout
         if (error.code === 'ERR_NETWORK' || error.code === 'ERR_CONNECTION_RESET' || error.message?.includes('Network Error')) {
           console.error('❌ Backend health check failed - network error:', error)
+          setBackendOnline(false)
+        } else if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+          console.error('❌ Backend health check timed out - server may be slow or not responding:', error)
           setBackendOnline(false)
         } else {
           console.error('❌ Backend health check failed:', error)

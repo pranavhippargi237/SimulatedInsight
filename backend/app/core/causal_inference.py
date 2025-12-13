@@ -969,4 +969,115 @@ class CausalInferenceEngine:
             "variance_explained": {},
             "confidence_scores": {"overall_confidence": 0.3}
         }
+    
+    async def _add_roi_to_counterfactuals(
+        self,
+        counterfactuals: List[Dict[str, Any]],
+        bottleneck: Dict[str, Any],
+        stage: str
+    ) -> List[Dict[str, Any]]:
+        """Add ROI calculations to counterfactuals."""
+        from app.core.roi_calculator import ROICalculator
+        
+        roi_calc = ROICalculator()
+        enhanced = []
+        
+        for cf in counterfactuals:
+            improvement_pct = cf.get('improvement_pct', 0)
+            scenario = cf.get('scenario', '')
+            
+            # Estimate cost and savings
+            if 'staff' in scenario.lower() or 'tech' in scenario.lower():
+                # Staffing intervention
+                cost_per_hour = 50.0  # $50/hour for temp staff
+                hours_per_day = 8
+                daily_cost = cost_per_hour * hours_per_day
+                
+                # Savings from reduced wait times
+                wait_reduction_min = cf.get('current_outcome', 0) - cf.get('predicted_outcome', 0)
+                # Each minute saved = $10 in avoided LWBS risk + efficiency
+                daily_savings = wait_reduction_min * 10 * 24  # Rough estimate
+                
+                roi_pct = ((daily_savings - daily_cost) / daily_cost * 100) if daily_cost > 0 else 0
+                payback_days = daily_cost / daily_savings if daily_savings > 0 else 999
+                
+                cf['roi'] = {
+                    "daily_cost": daily_cost,
+                    "daily_savings": daily_savings,
+                    "roi_percentage": roi_pct,
+                    "payback_days": payback_days,
+                    "net_daily_benefit": daily_savings - daily_cost
+                }
+            else:
+                # Process improvement (lower cost)
+                cf['roi'] = {
+                    "daily_cost": 0,
+                    "daily_savings": improvement_pct * 100,  # Rough estimate
+                    "roi_percentage": 999 if improvement_pct > 0 else 0,
+                    "payback_days": 0,
+                    "net_daily_benefit": improvement_pct * 100
+                }
+            
+            enhanced.append(cf)
+        
+        return enhanced
+    
+    async def _calculate_confidence_scores(
+        self,
+        causal_results: Dict[str, Any],
+        bayesian_results: Dict[str, Any],
+        shap_results: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Calculate overall confidence scores for the analysis."""
+        scores = {}
+        
+        # Confidence from ATE CI width
+        ate = causal_results.get("ate", {})
+        if ate and ate.get("ci_lower") and ate.get("ci_upper"):
+            ci_width = ate.get("ci_upper", 0) - ate.get("ci_lower", 0)
+            ate_value = abs(ate.get("value", 0))
+            if ate_value > 0:
+                # Narrower CI = higher confidence
+                ci_ratio = ci_width / ate_value
+                scores["ate_confidence"] = max(0, min(1, 1 - (ci_ratio / 2)))  # 0-1 scale
+            else:
+                scores["ate_confidence"] = 0.5
+        else:
+            scores["ate_confidence"] = 0.3  # Low confidence without CI
+        
+        # Confidence from Bayesian network fit
+        if bayesian_results.get("inference", {}).get("fitted"):
+            scores["bayesian_confidence"] = 0.7
+        else:
+            scores["bayesian_confidence"] = 0.3
+        
+        # Confidence from SHAP attributions
+        if shap_results.get("attributions"):
+            scores["attribution_confidence"] = 0.8
+        else:
+            scores["attribution_confidence"] = 0.3
+        
+        # Overall confidence (weighted average)
+        scores["overall_confidence"] = (
+            scores.get("ate_confidence", 0.3) * 0.4 +
+            scores.get("bayesian_confidence", 0.3) * 0.3 +
+            scores.get("attribution_confidence", 0.3) * 0.3
+        )
+        
+        return scores
+    
+    def _fallback_analysis(self, bottleneck: Dict[str, Any]) -> Dict[str, Any]:
+        """Fallback when causal analysis fails."""
+        return {
+            "causal_graph": "",
+            "ate_estimates": {},
+            "probabilistic_insights": {},
+            "feature_attributions": {},
+            "counterfactuals": [],
+            "confounders": [],
+            "interactions": [],
+            "equity_analysis": {},
+            "variance_explained": {},
+            "confidence_scores": {"overall_confidence": 0.3}
+        }
 

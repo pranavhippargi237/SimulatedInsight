@@ -31,3 +31,4 @@ async def test_nlp_extract_time():
     assert result.scenario.time_start is not None
     assert result.scenario.time_end is not None
 
+

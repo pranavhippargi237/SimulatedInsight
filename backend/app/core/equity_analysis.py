@@ -294,3 +294,4 @@ class EquityAnalyzer:
             recommendations.append("No significant equity disparities detected")
         
         return recommendations
+

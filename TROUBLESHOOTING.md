@@ -179,3 +179,4 @@ curl -X POST http://localhost:8000/api/detect?window_hours=24&top_n=3
 ```
 
 If all three work, the backend is running correctly. If they timeout, check storage services.
+

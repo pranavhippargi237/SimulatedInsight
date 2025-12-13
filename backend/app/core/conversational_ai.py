@@ -4,6 +4,7 @@ Combines conversation management, intent understanding, and action execution.
 """
 import logging
 import math
+import json
 from typing import Dict, Any, Optional
 from app.core.conversation_manager import ConversationManager
 from app.core.simulation import EDSimulation
@@ -72,6 +73,66 @@ class ConversationalAI:
                 "response": f"I encountered an error processing your query: {str(e)}. Could you try rephrasing?",
                 "conversation_id": conversation_id
             }
+    
+    async def chat_stream(
+        self,
+        query: str,
+        conversation_id: str = "default",
+        system_context: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Streaming chat interface - process user query and stream response.
+        
+        Args:
+            query: User's natural language query
+            conversation_id: Conversation session ID
+            system_context: Additional system context (current ED state, etc.)
+            
+        Yields:
+            Response chunks and final results
+        """
+        import asyncio
+        
+        try:
+            # Process query and execute actions (same as non-streaming)
+            parsed = await self.conversation_manager.process_with_context(
+                query=query,
+                conversation_id=conversation_id,
+                system_context=system_context
+            )
+            
+            # Execute actions
+            results = await self._execute_actions(parsed, conversation_id, query)
+            
+            # Send initial results as JSON
+            yield f"data: {json.dumps({'type': 'results', 'data': results})}\n\n"
+            
+            # Stream response text
+            query_lower = query.lower() if query else ""
+            is_comparison_query = (
+                "weekday" in query_lower or "weekend" in query_lower or 
+                "compare" in query_lower or "difference" in query_lower or
+                "different" in query_lower or "vs" in query_lower or "versus" in query_lower
+            )
+            
+            async for chunk in self._generate_response_stream(
+                query=query,
+                parsed=parsed,
+                results=results,
+                conversation_id=conversation_id,
+                is_comparison_query=is_comparison_query
+            ):
+                yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+            
+            # Send completion signal
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            
+        except asyncio.TimeoutError:
+            logger.error("Streaming chat processing timed out")
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Processing timed out'})}\n\n"
+        except Exception as e:
+            logger.error(f"Streaming chat processing failed: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
     
     async def _chat_internal(
         self,
@@ -642,6 +703,134 @@ class ConversationalAI:
         
         return results
     
+    async def _generate_response_stream(
+        self,
+        query: str,
+        parsed: Dict[str, Any],
+        results: Dict[str, Any],
+        conversation_id: str,
+        is_comparison_query: bool = False
+    ):
+        """Generate natural language response using OpenAI with streaming."""
+        conversation_manager = self.conversation_manager
+        
+        # If no OpenAI client, fall back to non-streaming
+        if not conversation_manager.client:
+            response_text = await self._generate_response(
+                query, parsed, results, conversation_id, is_comparison_query
+            )
+            yield response_text
+            return
+        
+        # Build context (same as non-streaming version)
+        context_parts = []
+        
+        if results.get("simulation"):
+            sim = results["simulation"]
+            context_parts.append(f"Simulation Results: DTD={sim.get('predicted_metrics', {}).get('dtd', 'N/A')} min, LOS={sim.get('predicted_metrics', {}).get('los', 'N/A')} min, LWBS={sim.get('predicted_metrics', {}).get('lwbs', 'N/A')}")
+        
+        if results.get("action_plan"):
+            plan = results["action_plan"]
+            context_parts.append(f"Action Plan: {len(plan.get('recommendations', []))} recommendations generated")
+        
+        if results.get("bottlenecks"):
+            bottlenecks = results["bottlenecks"]
+            if isinstance(bottlenecks, list) and len(bottlenecks) > 0:
+                context_parts.append(f"Bottlenecks detected ({len(bottlenecks)} total):")
+                for i, b in enumerate(bottlenecks[:5], 1):
+                    name = b.get("bottleneck_name", f"Bottleneck {i}")
+                    wait = b.get("current_wait_time_minutes", 0)
+                    severity = b.get("severity", "medium")
+                    impact = b.get("impact_score", 0)
+                    stage = b.get("stage", "unknown")
+                    context_parts.append(f"  {i}. {name} ({stage}): {wait:.0f} min wait, {severity} severity, {impact*100:.0f}% impact")
+        
+        if results.get("current_metrics"):
+            metrics = results["current_metrics"]
+            import math
+            dtd = metrics.get('dtd', 0)
+            los = metrics.get('los', 0)
+            lwbs = metrics.get('lwbs', 0)
+            dtd = dtd if math.isfinite(dtd) else 0
+            los = los if math.isfinite(los) else 0
+            lwbs = lwbs if math.isfinite(lwbs) else 0
+            context_parts.append(f"Current Metrics: DTD={dtd:.1f} min, LOS={los:.1f} min, LWBS={lwbs*100:.1f}%")
+        
+        metric_name_for_prompt = "metric"
+        context = "\n".join(context_parts) if context_parts else "No results yet"
+        
+        # Get conversation history
+        history = conversation_manager.get_conversation_history(conversation_id)
+        
+        # Build messages (same as non-streaming)
+        messages = [
+            {
+                "role": "system",
+                "content": """You are a helpful ED operations assistant. Generate natural, conversational responses that:
+1. Acknowledge what the user asked
+2. Explain what you did
+3. Highlight key findings
+4. Provide actionable insights
+5. Invite follow-up questions
+
+Be conversational, helpful, and clear. Use natural language, not technical jargon."""
+            }
+        ]
+        
+        for msg in history[-5:]:
+            if msg["role"] in ["user", "assistant"]:
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+        
+        metric_display = metric_name_for_prompt
+        prompt = f"""User asked: "{query}"
+
+I analyzed their ED and found:
+{context}
+
+Generate a natural, conversational response that:
+1. Acknowledges their question in a friendly, professional way
+2. Explains what you analyzed (be specific - mention bottlenecks by name, wait times, metrics)
+3. Highlights the KEY findings with actual numbers (wait times, DTD, LOS, LWBS rates)
+4. Provides actionable insights about what these bottlenecks mean and WHY they're happening
+5. Naturally invites follow-up questions
+
+Be conversational but data-driven and analytical. Don't be generic - use SPECIFIC NUMBERS."""
+        
+        messages.append({"role": "user", "content": prompt})
+        
+        # Check for agent output first (same as non-streaming)
+        if results.get("agent_output") and len(results["agent_output"].strip()) > 30:
+            agent_response = results["agent_output"]
+            yield agent_response
+            return
+        
+        # Stream response from OpenAI
+        try:
+            stream = conversation_manager.client.chat.completions.create(
+                model=settings.OPENAI_MODEL,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=1500,
+                stream=True
+            )
+            
+            # OpenAI stream is synchronous, iterate normally
+            for chunk in stream:
+                if chunk.choices and len(chunk.choices) > 0:
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        yield delta.content
+        except Exception as e:
+            logger.error(f"Streaming response generation failed: {e}")
+            # Fallback to non-streaming
+            response_text = await self._generate_response(
+                query, parsed, results, conversation_id, is_comparison_query
+            )
+            yield response_text
+
     async def _generate_response(
         self,
         query: str,
@@ -1042,6 +1231,38 @@ IMPORTANT:
             return parsed.get("response", "I've processed your query. Here are the results.")
     
     def _format_comparison(self, comparison: Dict[str, Any]) -> str:
+        """Format comparison results into readable text."""
+        aggregates = comparison.get("aggregates", {})
+        diffs = comparison.get("diffs", {})
+        baseline = comparison.get("baseline", "")
+        
+        parts = []
+        for day, metrics in aggregates.items():
+            arrivals = metrics.get("arrivals", 0)
+            lwbs_rate = metrics.get("lwbs_rate", 0)
+            mean_waits = metrics.get("mean_waits", {})
+            
+            parts.append(f"\n**{day}:**")
+            parts.append(f"- Arrivals: {arrivals} patients")
+            parts.append(f"- LWBS Rate: {lwbs_rate*100:.1f}%")
+            if mean_waits:
+                wait_strs = [f"{stage.replace('_', ' ').title()}: {wait:.1f} min" for stage, wait in mean_waits.items()]
+                parts.append(f"- Average Wait Times: {', '.join(wait_strs)}")
+            
+            # Add differences
+            if day in diffs:
+                diff = diffs[day]
+                parts.append(f"\n**Differences vs {baseline}:**")
+                if diff.get("arrivals_delta"):
+                    parts.append(f"- Arrivals: {diff['arrivals_delta']:+.0f} ({diff.get('arrivals_pct', 0):+.1f}% change)")
+                if diff.get("lwbs_delta") is not None:
+                    parts.append(f"- LWBS Rate: {diff['lwbs_delta']*100:+.1f} percentage points ({diff.get('lwbs_pct', 0):+.1f}% change)")
+                if diff.get("mean_waits_delta"):
+                    for stage, wait_diff in diff["mean_waits_delta"].items():
+                        stage_name = stage.replace('_', ' ').title()
+                        parts.append(f"- {stage_name} Wait: {wait_diff.get('delta', 0):+.1f} min ({wait_diff.get('pct', 0):+.1f}% change)")
+        
+        return "\n".join(parts)
         """Format comparison results into readable text."""
         aggregates = comparison.get("aggregates", {})
         diffs = comparison.get("diffs", {})

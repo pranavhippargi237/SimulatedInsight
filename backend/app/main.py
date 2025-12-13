@@ -9,12 +9,21 @@ import logging
 from app.routers import ingest, metrics, detect, simulate, optimize, health, advisor, intelligent, chat, insights, flow
 from app.core.config import settings
 
-# Configure logging
+# Configure logging with more detail
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
 )
 logger = logging.getLogger(__name__)
+
+# Log startup
+logger.info("=" * 60)
+logger.info("🚀 Starting ED Bottleneck Engine API")
+logger.info("=" * 60)
+print("=" * 60)
+print("🚀 Starting ED Bottleneck Engine API")
+print("=" * 60)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -25,10 +34,17 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# CORS middleware
+# CORS middleware - allow environment variable override for production
+import os
+cors_origins = settings.CORS_ORIGINS.copy()
+if os.getenv("CORS_ORIGINS"):
+    # Allow comma-separated list from environment
+    cors_origins.extend([origin.strip() for origin in os.getenv("CORS_ORIGINS").split(",")])
+cors_origins.extend(["http://localhost:3000", "http://127.0.0.1:3000"])  # Always include localhost for dev
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS + ["http://localhost:3000", "http://127.0.0.1:3000"],  # Explicitly include localhost
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,6 +60,8 @@ app.include_router(optimize.router, prefix="/api", tags=["Optimization"])
 app.include_router(advisor.router, prefix="/api", tags=["Advisor"])
 app.include_router(intelligent.router, prefix="/api", tags=["Intelligent"])
 app.include_router(chat.router, prefix="/api", tags=["Chat"])
+# Also mount chat router at /api/v1 for versioned streaming endpoint
+app.include_router(chat.router, prefix="/api/v1", tags=["Chat"])
 app.include_router(insights.router, tags=["Insights"])
 app.include_router(flow.router, prefix="/api", tags=["Flow"])
 
@@ -61,15 +79,37 @@ async def global_exception_handler(request, exc):
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup."""
-    logger.info("Starting ED Bottleneck Engine API...")
-    # Initialize database connections, etc.
-    from app.data.storage import init_storage
-    await init_storage()
-    logger.info("API startup complete.")
+    import time
+    startup_start = time.time()
+    
+    logger.info("🔄 Starting API initialization...")
+    print(f"[{time.strftime('%H:%M:%S')}] 🔄 Starting API initialization...")
+    
+    try:
+        # Initialize database connections, etc.
+        logger.info("📦 Initializing storage...")
+        print(f"[{time.strftime('%H:%M:%S')}] 📦 Initializing storage...")
+        from app.data.storage import init_storage
+        await init_storage()
+        
+        elapsed = time.time() - startup_start
+        logger.info(f"✅ API startup complete in {elapsed:.3f}s")
+        print(f"[{time.strftime('%H:%M:%S')}] ✅ API startup complete in {elapsed:.3f}s")
+        print("=" * 60)
+        print("🌐 API is ready and listening on http://localhost:8000")
+        print("📚 API docs available at http://localhost:8000/docs")
+        print("=" * 60)
+    except Exception as e:
+        elapsed = time.time() - startup_start
+        logger.error(f"❌ API startup failed after {elapsed:.3f}s: {e}", exc_info=True)
+        print(f"[{time.strftime('%H:%M:%S')}] ❌ API startup failed after {elapsed:.3f}s: {e}")
+        raise
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown."""
-    logger.info("Shutting down ED Bottleneck Engine API...")
+    import time
+    logger.info("🛑 Shutting down ED Bottleneck Engine API...")
+    print(f"[{time.strftime('%H:%M:%S')}] 🛑 Shutting down ED Bottleneck Engine API...")
 

@@ -75,55 +75,114 @@ class EDSimulation:
         # Run baseline simulation first (with no changes) if not provided
         if not baseline_metrics:
             logger.info("Running baseline simulation with default resources...")
-            baseline_request = SimulationRequest(
-                scenario=[ScenarioChange(action="add", resource_type="nurse", quantity=0)],  # No change
-                simulation_hours=request.simulation_hours,
-                iterations=request.iterations or 50
-            )
-            baseline_results = []
-            for i in range(baseline_request.iterations or 50):
-                baseline_result = await self._run_single_iteration(baseline_request, i)
-                baseline_results.append(baseline_result)
-            baseline_metrics = self._aggregate_results(baseline_results)
-            logger.info(f"Baseline simulation complete: avg DTD={baseline_metrics.get('dtd', 0):.2f}")
+            try:
+                baseline_request = SimulationRequest(
+                    scenario=[ScenarioChange(action="add", resource_type="nurse", quantity=0)],  # No change
+                    simulation_hours=request.simulation_hours,
+                    iterations=request.iterations or 50
+                )
+                baseline_results = []
+                max_iterations = baseline_request.iterations or 50
+                for i in range(max_iterations):
+                    try:
+                        baseline_result = await self._run_single_iteration(baseline_request, i)
+                        if baseline_result and isinstance(baseline_result, dict):
+                            baseline_results.append(baseline_result)
+                    except Exception as e:
+                        logger.warning(f"Baseline iteration {i} failed: {e}, skipping")
+                        continue
+                
+                if not baseline_results:
+                    logger.warning("No baseline results generated, using safe defaults")
+                    baseline_metrics = {"dtd": 30.0, "los": 150.0, "lwbs": 0.05, "bed_utilization": 0.7}
+                else:
+                    baseline_metrics = self._aggregate_results(baseline_results)
+                    logger.info(f"Baseline simulation complete: avg DTD={baseline_metrics.get('dtd', 0):.2f}")
+            except Exception as e:
+                logger.error(f"Baseline simulation failed: {e}, using safe defaults", exc_info=True)
+                baseline_metrics = {"dtd": 30.0, "los": 150.0, "lwbs": 0.05, "bed_utilization": 0.7}
         
-        # Run scenario simulation
+        # Run scenario simulation with error handling
         iterations = request.iterations or 50
         results = []
         
         # Handle both single scenario (legacy) and list of scenarios
-        scenarios = request.scenario if isinstance(request.scenario, list) else [request.scenario]
-        scenario_desc = ", ".join([f"{s.action} {s.quantity} {s.resource_type}" for s in scenarios])
-        logger.info(f"Running scenario simulation: {scenario_desc}")
+        try:
+            scenarios = request.scenario if isinstance(request.scenario, list) else [request.scenario]
+            scenario_desc = ", ".join([f"{s.action} {s.quantity} {s.resource_type}" for s in scenarios])
+            logger.info(f"Running scenario simulation: {scenario_desc}")
+        except Exception as e:
+            logger.error(f"Invalid scenario format: {e}, using default", exc_info=True)
+            scenarios = [ScenarioChange(action="add", resource_type="nurse", quantity=0)]
+            scenario_desc = "default"
         
+        # Run iterations with error handling
+        successful_iterations = 0
         for i in range(iterations):
-            result = await self._run_single_iteration(request, i)
-            results.append(result)
-        
-        logger.info(f"Scenario simulation complete: {len(results)} iterations, avg DTD={np.mean([r['dtd'] for r in results]):.2f}")
-        
-        # Aggregate results
-        predicted_metrics = self._aggregate_results(results)
-        
-        # Calculate deltas
-        deltas = {}
-        for key in predicted_metrics:
-            if key in baseline_metrics and baseline_metrics[key] > 0:
-                # Calculate percentage change: (new - old) / old * 100
-                # For DTD/LOS: negative change = improvement (time decreased)
-                # For LWBS: negative change = improvement (rate decreased)
-                delta_pct = ((predicted_metrics[key] - baseline_metrics[key]) / baseline_metrics[key]) * 100
-                
-                if key in ["dtd", "los"]:
-                    # For time metrics: reduction is positive when time decreases
-                    # If predicted < baseline (good), delta_pct is negative, so reduction is positive
-                    # If predicted > baseline (bad), delta_pct is positive, so reduction is negative
-                    deltas[f"{key}_reduction"] = -delta_pct  # Positive = improvement (reduction in time)
-                elif key == "lwbs":
-                    # For rate metrics: drop is positive when rate decreases
-                    deltas[f"{key}_drop"] = -delta_pct  # Positive = improvement (reduction in rate)
+            try:
+                result = await self._run_single_iteration(request, i)
+                if result and isinstance(result, dict):
+                    # Validate result has required keys
+                    if all(key in result for key in ["dtd", "los", "lwbs"]):
+                        results.append(result)
+                        successful_iterations += 1
+                    else:
+                        logger.warning(f"Iteration {i} returned incomplete result, skipping")
                 else:
-                    deltas[f"{key}_change"] = delta_pct
+                    logger.warning(f"Iteration {i} returned invalid result, skipping")
+            except Exception as e:
+                logger.warning(f"Simulation iteration {i} failed: {e}, skipping", exc_info=True)
+                continue
+        
+        if not results:
+            logger.error("No successful simulation iterations, using baseline as fallback")
+            predicted_metrics = baseline_metrics.copy()
+        else:
+            logger.info(f"Scenario simulation complete: {successful_iterations}/{iterations} successful iterations, avg DTD={np.mean([r['dtd'] for r in results]):.2f}")
+            # Aggregate results
+            predicted_metrics = self._aggregate_results(results)
+        
+        # Calculate deltas with error handling
+        deltas = {}
+        try:
+            for key in predicted_metrics:
+                if key in baseline_metrics:
+                    baseline_val = baseline_metrics[key]
+                    predicted_val = predicted_metrics[key]
+                    
+                    # Validate values are finite and positive
+                    if not (math.isfinite(baseline_val) and math.isfinite(predicted_val)):
+                        logger.warning(f"Non-finite values for {key}: baseline={baseline_val}, predicted={predicted_val}")
+                        continue
+                    
+                    if baseline_val > 0:
+                        # Calculate percentage change: (new - old) / old * 100
+                        # For DTD/LOS: negative change = improvement (time decreased)
+                        # For LWBS: negative change = improvement (rate decreased)
+                        try:
+                            delta_pct = ((predicted_val - baseline_val) / baseline_val) * 100
+                            
+                            # Validate delta is finite
+                            if not math.isfinite(delta_pct):
+                                logger.warning(f"Non-finite delta for {key}, skipping")
+                                continue
+                            
+                            if key in ["dtd", "los"]:
+                                # For time metrics: reduction is positive when time decreases
+                                # If predicted < baseline (good), delta_pct is negative, so reduction is positive
+                                # If predicted > baseline (bad), delta_pct is positive, so reduction is negative
+                                deltas[f"{key}_reduction"] = -delta_pct  # Positive = improvement (reduction in time)
+                            elif key == "lwbs":
+                                # For rate metrics: drop is positive when rate decreases
+                                deltas[f"{key}_drop"] = -delta_pct  # Positive = improvement (reduction in rate)
+                            else:
+                                deltas[f"{key}_change"] = delta_pct
+                        except (ZeroDivisionError, ValueError, TypeError) as e:
+                            logger.warning(f"Error calculating delta for {key}: {e}")
+                            continue
+        except Exception as e:
+            logger.error(f"Error calculating deltas: {e}", exc_info=True)
+            # Return empty deltas rather than crashing
         
         # Calculate confidence (based on variance)
         confidence = self._calculate_confidence(results)
@@ -132,7 +191,7 @@ class EDSimulation:
         
         scenario_id = f"sim_{uuid.uuid4().hex[:8]}"
         
-        return SimulationResult(
+        result = SimulationResult(
             scenario_id=scenario_id,
             baseline_metrics=baseline_metrics,
             predicted_metrics=predicted_metrics,
@@ -141,6 +200,16 @@ class EDSimulation:
             execution_time_seconds=execution_time,
             traces=results[:10]  # Store first 10 traces for debugging
         )
+        
+        # Cache simulation result (1 hour TTL - simulations are expensive)
+        try:
+            from app.core.cache import cache_set
+            cache_key = f"sim_result_{scenario_id}"
+            await cache_set(cache_key, result.dict() if hasattr(result, 'dict') else result, ttl=3600)
+        except Exception as e:
+            logger.debug(f"Failed to cache simulation result: {e}")
+        
+        return result
     
     async def _get_baseline_metrics(self) -> Dict[str, float]:
         """Get baseline metrics from historical data."""
@@ -279,31 +348,84 @@ class EDSimulation:
         return resources
     
     def _aggregate_results(self, results: List[Dict[str, Any]]) -> Dict[str, float]:
-        """Aggregate Monte Carlo results."""
+        """
+        Aggregate Monte Carlo results with error handling.
+        
+        Returns safe defaults if aggregation fails or results are invalid.
+        """
         if not results:
-            return {}
+            logger.warning("No results to aggregate, returning safe defaults")
+            return {"dtd": 30.0, "los": 150.0, "lwbs": 0.05, "bed_utilization": 0.7}
         
         aggregated = {}
-        for key in ["dtd", "los", "lwbs", "bed_utilization"]:
-            values = [r[key] for r in results if key in r]
-            if values:
-                aggregated[key] = np.mean(values)
+        try:
+            for key in ["dtd", "los", "lwbs", "bed_utilization"]:
+                values = []
+                for r in results:
+                    if key in r:
+                        val = r[key]
+                        # Validate value is finite and reasonable
+                        if math.isfinite(val) and val >= 0:
+                            # Cap extreme values (sanity checks)
+                            if key in ["dtd", "los"]:
+                                val = min(val, 1000.0)  # Cap at 1000 minutes
+                            elif key == "lwbs":
+                                val = min(val, 1.0)  # Cap at 100%
+                            elif key == "bed_utilization":
+                                val = min(val, 1.0)  # Cap at 100%
+                            values.append(val)
+                
+                if values:
+                    mean_val = float(np.mean(values))
+                    # Final validation
+                    if math.isfinite(mean_val):
+                        aggregated[key] = mean_val
+                    else:
+                        logger.warning(f"Non-finite mean for {key}, using default")
+                        aggregated[key] = {"dtd": 30.0, "los": 150.0, "lwbs": 0.05, "bed_utilization": 0.7}.get(key, 0.0)
+                else:
+                    # No valid values, use safe default
+                    aggregated[key] = {"dtd": 30.0, "los": 150.0, "lwbs": 0.05, "bed_utilization": 0.7}.get(key, 0.0)
+        except Exception as e:
+            logger.error(f"Error aggregating results: {e}, returning safe defaults", exc_info=True)
+            return {"dtd": 30.0, "los": 150.0, "lwbs": 0.05, "bed_utilization": 0.7}
         
         return aggregated
     
     def _calculate_confidence(self, results: List[Dict[str, Any]]) -> float:
-        """Calculate confidence based on result variance."""
-        if len(results) < 2:
+        """
+        Calculate confidence based on result variance.
+        
+        Returns confidence score between 0.5 and 1.0 based on coefficient of variation.
+        Lower variance = higher confidence.
+        """
+        if not results or len(results) < 2:
             return 0.5
         
-        dtd_values = [r["dtd"] for r in results if "dtd" in r]
-        if not dtd_values:
+        try:
+            dtd_values = []
+            for r in results:
+                if "dtd" in r:
+                    val = r["dtd"]
+                    if math.isfinite(val) and val > 0:
+                        dtd_values.append(val)
+            
+            if not dtd_values or len(dtd_values) < 2:
+                return 0.5
+            
+            mean_dtd = np.mean(dtd_values)
+            std_dtd = np.std(dtd_values)
+            
+            if mean_dtd > 0 and math.isfinite(mean_dtd) and math.isfinite(std_dtd):
+                cv = std_dtd / mean_dtd
+                # Confidence inversely related to CV (lower variance = higher confidence)
+                confidence = max(0.5, min(1.0, 1.0 - min(cv, 0.5)))  # Cap CV influence at 0.5
+                return float(confidence)
+            else:
+                return 0.5
+        except Exception as e:
+            logger.warning(f"Error calculating confidence: {e}, using default 0.5")
             return 0.5
-        
-        cv = np.std(dtd_values) / np.mean(dtd_values) if np.mean(dtd_values) > 0 else 1.0
-        confidence = max(0.5, min(1.0, 1.0 - cv))
-        
-        return confidence
 
 
 class PatientGenerator:

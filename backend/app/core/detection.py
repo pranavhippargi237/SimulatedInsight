@@ -1,5 +1,19 @@
 """
-Bottleneck detection engine using queueing models and anomaly detection.
+Bottleneck Detection Engine using queueing models, anomaly detection, and causal inference.
+
+This module provides comprehensive bottleneck detection with:
+- Queueing analysis at each ED stage (triage, doctor, labs, imaging, bed)
+- Anomaly detection using Z-scores and isolation forests
+- Metric-based detection (DTD, LOS, LWBS thresholds)
+- Causal inference integration (DoWhy) for deep root cause analysis
+- Patient flow cascade analysis (first and second-order effects)
+- Comprehensive error handling for edge cases (empty data, invalid timestamps)
+
+Error Handling:
+- Graceful fallbacks for empty data
+- Safe defaults for missing KPIs
+- Timeout protection for long-running analyses
+- Validation of all numeric values (finite checks)
 """
 import logging
 import math
@@ -51,32 +65,63 @@ class BottleneckDetector:
             logger.warning("No KPIs available for bottleneck detection")
             return []
         
-        # Sort by timestamp to get the most recent data
-        all_kpis.sort(key=lambda k: k.get("timestamp", "") if isinstance(k.get("timestamp"), str) else (k.get("timestamp") or datetime.min))
+        # Sort by timestamp to get the most recent data with error handling
+        try:
+            all_kpis.sort(key=lambda k: k.get("timestamp", "") if isinstance(k.get("timestamp"), str) else (k.get("timestamp") or datetime.min))
+        except Exception as e:
+            logger.warning(f"Error sorting KPIs: {e}, using unsorted list")
         
         # Get the most recent KPI timestamp (from the data, not from now)
         latest_kpi = all_kpis[-1] if all_kpis else None
+        latest_timestamp = datetime.utcnow()  # Safe default
+        
         if latest_kpi:
-            latest_timestamp = latest_kpi.get("timestamp")
-            if isinstance(latest_timestamp, str):
-                latest_timestamp = datetime.fromisoformat(latest_timestamp.replace("Z", "+00:00"))
-        else:
-            latest_timestamp = datetime.utcnow()
+            try:
+                latest_timestamp = latest_kpi.get("timestamp")
+                if isinstance(latest_timestamp, str):
+                    latest_timestamp = datetime.fromisoformat(latest_timestamp.replace("Z", "+00:00"))
+                elif not isinstance(latest_timestamp, datetime):
+                    latest_timestamp = datetime.utcnow()
+            except (ValueError, TypeError, AttributeError) as e:
+                logger.warning(f"Error parsing latest KPI timestamp: {e}, using current time")
+                latest_timestamp = datetime.utcnow()
         
         # Calculate window from the latest data timestamp, not from now
         end_time = latest_timestamp if latest_timestamp else datetime.utcnow()
         start_time = end_time - timedelta(hours=window_hours)
         
-        # Get events and KPIs with timeout protection
+        # Get events and KPIs with timeout protection and error handling
         import asyncio
+        events = []
+        kpis = []
+        
         try:
             events = await asyncio.wait_for(
                 get_events(start_time, end_time),
                 timeout=10.0
             )
+            if not events:
+                events = []
         except asyncio.TimeoutError:
             logger.warning("get_events timed out for bottleneck detection")
             events = []
+        except Exception as e:
+            logger.warning(f"Error fetching events: {e}, using empty list", exc_info=True)
+            events = []
+        
+        try:
+            kpis = await asyncio.wait_for(
+                get_kpis(start_time, end_time),
+                timeout=10.0
+            )
+            if not kpis:
+                kpis = []
+        except asyncio.TimeoutError:
+            logger.warning("get_kpis timed out for bottleneck detection")
+            kpis = []
+        except Exception as e:
+            logger.warning(f"Error fetching KPIs: {e}, using empty list", exc_info=True)
+            kpis = []
         
         try:
             kpis = await asyncio.wait_for(
@@ -99,52 +144,91 @@ class BottleneckDetector:
         
         bottlenecks = []
         
-        # 1. Analyze queueing at each stage
-        stage_bottlenecks = await self._analyze_stage_queues(events, kpis)
-        bottlenecks.extend(stage_bottlenecks)
+        # 1. Analyze queueing at each stage with error handling
+        try:
+            stage_bottlenecks = await self._analyze_stage_queues(events, kpis)
+            if stage_bottlenecks:
+                bottlenecks.extend(stage_bottlenecks)
+        except Exception as e:
+            logger.warning(f"Error analyzing stage queues: {e}", exc_info=True)
         
-        # 2. Detect anomalies in KPIs
-        anomaly_bottlenecks = await self._detect_anomalies(kpis)
-        bottlenecks.extend(anomaly_bottlenecks)
+        # 2. Detect anomalies in KPIs with error handling
+        try:
+            anomaly_bottlenecks = await self._detect_anomalies(kpis)
+            if anomaly_bottlenecks:
+                bottlenecks.extend(anomaly_bottlenecks)
+        except Exception as e:
+            logger.warning(f"Error detecting anomalies: {e}", exc_info=True)
         
         # 3. Convert critical metrics (DTD, LOS) into bottlenecks if they exceed thresholds
-        metric_bottlenecks = await self._detect_metric_bottlenecks(kpis, events)
-        bottlenecks.extend(metric_bottlenecks)
+        try:
+            metric_bottlenecks = await self._detect_metric_bottlenecks(kpis, events)
+            if metric_bottlenecks:
+                bottlenecks.extend(metric_bottlenecks)
+        except Exception as e:
+            logger.warning(f"Error detecting metric bottlenecks: {e}", exc_info=True)
         
         # 3. Causal inference analysis for each bottleneck (replaces rule-based RCA)
-        # DISABLED by default due to performance - enable only if needed
-        ENABLE_CAUSAL_ANALYSIS = False  # Disabled to prevent timeouts
+        # ENABLED with timeout protection and error handling
+        # Uses DoWhy for DAG-based causal inference, providing ATE estimates with confidence intervals
+        ENABLE_CAUSAL_ANALYSIS = True  # Enabled with proper error handling
         
-        if ENABLE_CAUSAL_ANALYSIS:
+        if ENABLE_CAUSAL_ANALYSIS and events and kpis:
             from app.core.causal_inference import CausalInferenceEngine
             from app.core.causal_narrative import generate_causal_narrative
             
             causal_engine = CausalInferenceEngine()
             
-            # Limit causal analysis to top 1 bottleneck to avoid timeout (further optimization)
-            bottlenecks_for_causal = bottlenecks[:1]
+            # Limit causal analysis to top 3 bottlenecks (increased from 1 for better coverage)
+            # DoWhy integration: Provides DAG-based causal inference with ATE estimates
+            bottlenecks_for_causal = bottlenecks[:min(3, len(bottlenecks))]
             
             for bottleneck in bottlenecks_for_causal:
-                # Perform causal inference analysis (with timeout protection)
+                # Perform causal inference analysis using DoWhy (with timeout protection and error handling)
+                # DoWhy provides:
+                # - Causal DAGs for each stage (imaging, labs, bed, doctor)
+                # - ATE (Average Treatment Effect) estimates with confidence intervals
+                # - Confounder identification
+                # - Propensity score matching for causal estimation
                 try:
                     import asyncio
                     
-                    # Run causal analysis with 5-second timeout (reduced from 10s)
+                    # Validate bottleneck data before analysis
+                    if not bottleneck:
+                        logger.warning("Empty bottleneck, skipping causal analysis")
+                        continue
+                    
+                    bottleneck_dict = bottleneck.dict() if hasattr(bottleneck, 'dict') else bottleneck
+                    if not isinstance(bottleneck_dict, dict):
+                        logger.warning(f"Invalid bottleneck format, skipping causal analysis")
+                        continue
+                    
+                    # Run DoWhy-based causal analysis with 10-second timeout (DoWhy can be slow)
                     try:
                         causal_analysis = await asyncio.wait_for(
                             causal_engine.analyze_bottleneck_causality(
-                                bottleneck.dict() if hasattr(bottleneck, 'dict') else bottleneck,
+                                bottleneck_dict,
                                 events,
                                 kpis,
                                 window_hours
                             ),
-                            timeout=5.0  # Reduced timeout
+                            timeout=10.0  # Increased timeout for DoWhy processing (DAG identification + estimation)
                         )
+                        
+                        # Validate causal analysis result
+                        if not causal_analysis or not isinstance(causal_analysis, dict):
+                            logger.warning(f"Invalid causal analysis result for {bottleneck.bottleneck_name}")
+                            causal_analysis = {}
+                        else:
+                            # Log DoWhy success
+                            ate = causal_analysis.get('ate_estimates', {})
+                            if ate:
+                                logger.info(f"DoWhy causal analysis complete for {bottleneck.bottleneck_name}: ATE={ate.get('value', 'N/A')}")
                     except asyncio.TimeoutError:
-                        logger.warning(f"Causal analysis timed out for {bottleneck.bottleneck_name}")
+                        logger.warning(f"Causal analysis timed out for {bottleneck.bottleneck_name}, using fallback")
                         causal_analysis = {}
                     except Exception as e:
-                        logger.warning(f"Causal analysis error for {bottleneck.bottleneck_name}: {e}")
+                        logger.warning(f"Causal analysis error for {bottleneck.bottleneck_name}: {e}", exc_info=True)
                         causal_analysis = {}
                     
                     # Generate LLM-powered narrative (with timeout) - skip if causal_analysis is empty

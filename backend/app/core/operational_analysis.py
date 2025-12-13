@@ -573,3 +573,4 @@ class OperationalAnalyzer:
         }
         return mapping.get(event_type)
 
+

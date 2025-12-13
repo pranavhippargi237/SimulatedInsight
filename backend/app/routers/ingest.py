@@ -22,29 +22,53 @@ async def ingest_csv(file: UploadFile = File(...), reset_first: bool = Query(Tru
     Set reset_first=false to append data instead.
     """
     import asyncio
+    import time
+    import logging
     
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=422, detail="File must be CSV format")
+    logger = logging.getLogger(__name__)
+    start_time = time.time()
     
     try:
+        logger.info(f"📤 CSV upload request received: {file.filename}")
+        print(f"[{time.strftime('%H:%M:%S')}] 📤 CSV upload request received: {file.filename}")
+        
+        if not file.filename.endswith('.csv'):
+            logger.warning(f"❌ Invalid file type: {file.filename}")
+            print(f"[{time.strftime('%H:%M:%S')}] ❌ Invalid file type: {file.filename}")
+            raise HTTPException(status_code=422, detail="File must be CSV format")
+        
         # Reset data first if requested (default: True)
         if reset_first:
-            print("🔄 Resetting existing data before upload...")
+            logger.info("🔄 Resetting existing data before upload...")
+            print(f"[{time.strftime('%H:%M:%S')}] 🔄 Resetting existing data before upload...")
             reset_sqlite()
             await cache_clear()
+            logger.info("✅ Data reset complete")
+            print(f"[{time.strftime('%H:%M:%S')}] ✅ Data reset complete")
         
-        # Add timeout to prevent hanging (60 seconds for large files)
+        logger.info("📥 Starting CSV ingestion (timeout: 120s)...")
+        print(f"[{time.strftime('%H:%M:%S')}] 📥 Starting CSV ingestion (timeout: 120s)...")
+        
+        # Add timeout to prevent hanging (120 seconds for large files - matches frontend)
         result = await asyncio.wait_for(
             ingester.ingest_csv(file),
-            timeout=60.0
+            timeout=120.0
         )
+        
+        elapsed = time.time() - start_time
+        logger.info(f"✅ CSV ingestion completed in {elapsed:.3f}s: {result.get('processed', 0)} events processed")
+        print(f"[{time.strftime('%H:%M:%S')}] ✅ CSV ingestion completed in {elapsed:.3f}s: {result.get('processed', 0)} events processed")
+        
         return result
     except asyncio.TimeoutError:
+        elapsed = time.time() - start_time
+        logger.error(f"⏱️ CSV ingestion timed out after {elapsed:.3f}s")
+        print(f"[{time.strftime('%H:%M:%S')}] ⏱️ CSV ingestion timed out after {elapsed:.3f}s")
         raise HTTPException(status_code=504, detail="Ingestion timed out. File may be too large. Please try a smaller file or split it into chunks.")
     except Exception as e:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error(f"CSV ingestion failed: {e}", exc_info=True)
+        elapsed = time.time() - start_time
+        logger.error(f"❌ CSV ingestion failed after {elapsed:.3f}s: {e}", exc_info=True)
+        print(f"[{time.strftime('%H:%M:%S')}] ❌ CSV ingestion failed after {elapsed:.3f}s: {e}")
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {str(e)}")
 
 
@@ -123,10 +147,10 @@ async def calculate_kpis(window_hours: int = 24):
     import asyncio
     
     try:
-        # Add timeout to prevent hanging (30 seconds)
+        # Add timeout to prevent hanging (60 seconds - increased for large datasets)
         kpis = await asyncio.wait_for(
             ingester.calculate_kpis(window_hours),
-            timeout=30.0
+            timeout=60.0
         )
         return {
             "status": "ok",

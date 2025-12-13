@@ -21,6 +21,9 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5173"
     ]
     
+    # Environment
+    ENVIRONMENT: str = "development"
+    
     # Storage: SQLite only (no external dependencies)
     # Removed: ClickHouse and Redis - using SQLite for all data storage
     

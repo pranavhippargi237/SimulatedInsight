@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: ed-backend
+    env: docker
+    dockerfilePath: ./backend/Dockerfile.prod
+    dockerContext: ./backend
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        value: https://ed-frontend.onrender.com
+      - key: ENVIRONMENT
+        value: production
+    healthCheckPath: /api/health
+
+  - type: web
+    name: ed-frontend
+    env: docker
+    dockerfilePath: ./frontend/Dockerfile.prod
+    dockerContext: ./frontend
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          name: ed-backend
+          type: web
+          property: host
+          value: https://ed-backend.onrender.com/api
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

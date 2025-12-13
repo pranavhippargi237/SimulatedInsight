@@ -559,3 +559,90 @@ class AdvancedBottleneckDetector:
             ]
         }
 
+
+        return insights
+    
+    def _insight_to_bottleneck(
+        self,
+        insight: AIInsight,
+        events: List[Dict[str, Any]],
+        kpis: List[Dict[str, Any]]
+    ) -> Optional[Bottleneck]:
+        """Convert AI insight to Bottleneck schema."""
+        # Map insight types to stages
+        stage_map = {
+            "multivariate": "system",
+            "rare_anomaly": "system",
+            "causal": "system",
+            "predictive": "system"
+        }
+        
+        stage = stage_map.get(insight.insight_type, "system")
+        
+        # Estimate wait time from description or use default
+        wait_time = 0.0
+        if "DTD" in insight.description:
+            # Extract number if possible
+            import re
+            numbers = re.findall(r'\d+\.?\d*', insight.description)
+            if numbers:
+                wait_time = float(numbers[0])
+        
+        return Bottleneck(
+            bottleneck_name=f"AI-Detected: {insight.insight_type.replace('_', ' ').title()}",
+            stage=stage,
+            impact_score=insight.confidence,
+            current_wait_time_minutes=wait_time,
+            causes=insight.causal_factors or ["AI-detected pattern"],
+            severity="high" if insight.confidence > 0.8 else "medium",
+            recommendations=self._generate_ai_recommendations(insight)
+        )
+    
+    def _generate_ai_recommendations(self, insight: AIInsight) -> List[str]:
+        """Generate recommendations based on AI insight."""
+        recommendations = []
+        
+        if insight.insight_type == "multivariate":
+            if "weekend" in insight.description.lower():
+                recommendations.append("Adjust weekend staffing to match hour-specific demand")
+            if "ESI" in insight.description or "acuity" in insight.description.lower():
+                recommendations.append("Reallocate resources based on ESI distribution patterns")
+        
+        elif insight.insight_type == "rare_anomaly":
+            recommendations.append("Investigate root cause of rare spike immediately")
+            recommendations.append("Implement early warning system for similar patterns")
+        
+        elif insight.insight_type == "causal":
+            if "bed" in str(insight.causal_factors).lower():
+                recommendations.append("Optimize bed turnover or add temporary capacity")
+            if "ESI" in str(insight.causal_factors):
+                recommendations.append("Implement acuity-based fast-track for low-ESI patients")
+        
+        elif insight.insight_type == "predictive":
+            recommendations.append(f"Preemptively allocate resources to prevent forecasted bottleneck")
+            recommendations.append("Activate surge protocol if forecast exceeds threshold")
+        
+        if not recommendations:
+            recommendations.append("Review AI-detected pattern with clinical team")
+        
+        return recommendations
+    
+    def get_ai_only_summary(self) -> Dict[str, Any]:
+        """Get summary of AI-only insights for tracking."""
+        return {
+            "total_ai_only": len(self.ai_only_insights),
+            "by_type": {
+                insight.insight_type: sum(1 for i in self.ai_only_insights if i.insight_type == insight.insight_type)
+                for insight in self.ai_only_insights
+            },
+            "avg_confidence": np.mean([i.confidence for i in self.ai_only_insights]) if self.ai_only_insights else 0.0,
+            "insights": [
+                {
+                    "type": i.insight_type,
+                    "description": i.description,
+                    "confidence": i.confidence
+                }
+                for i in self.ai_only_insights[:10]  # Top 10
+            ]
+        }
+

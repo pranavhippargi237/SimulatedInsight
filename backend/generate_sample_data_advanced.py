@@ -544,3 +544,81 @@ if __name__ == "__main__":
     print(f"  LWBS rate: {lwbs_count / total_patients * 100:.1f}% (target: 1.1-1.8%)")
     print(f"  Total events: {len(events)}")
 
+
+                    "duration_minutes": None,
+                    "esi": esi,
+                    "disease_category": disease_category
+                })
+        
+        events.sort(key=lambda x: x["timestamp"])
+        
+        # Validate
+        if validator:
+            validation = validator.validate_events(events, patient_journeys)
+            pass_rate = validation.get("pass_rate", 0.0)
+            
+            if pass_rate > best_pass_rate:
+                best_events = events
+                best_validation = validation
+                best_pass_rate = pass_rate
+            
+            # If we pass all tests, return early
+            if validation.get("passed", False) and pass_rate >= 0.95:
+                logger.info(f"Validation passed on iteration {iteration + 1}: {pass_rate:.1%}")
+                return events, validation
+        else:
+            # No validator, return first attempt
+            return events, {"passed": True, "pass_rate": 1.0, "iterations": 1}
+    
+    # Return best attempt
+    if best_events:
+        logger.info(f"Best validation result: {best_pass_rate:.1%} pass rate after {max_iterations} iterations")
+        return best_events, best_validation or {"passed": False, "pass_rate": best_pass_rate}
+    
+    return events, {"passed": False, "pass_rate": 0.0}
+
+
+def write_csv(events, filename="sample_data.csv"):
+    """Write events to CSV file."""
+    with open(filename, "w", newline="") as f:
+        fieldnames = [
+            "timestamp", "event_type", "patient_id", "stage",
+            "resource_type", "resource_id", "duration_minutes"
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for event in events:
+            writer.writerow({
+                "timestamp": event["timestamp"].isoformat(),
+                "event_type": event["event_type"],
+                "patient_id": event["patient_id"],
+                "stage": event["stage"] or "",
+                "resource_type": event.get("resource_type") or "",
+                "resource_id": event.get("resource_id") or "",
+                "duration_minutes": event.get("duration_minutes") or "",
+            })
+
+
+if __name__ == "__main__":
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    
+    print("Generating validated synthetic ED events...")
+    events, validation = generate_events_validated(num_patients=500, days=2)
+    write_csv(events, "sample_data.csv")
+    
+    print(f"\nGenerated {len(events)} events from {len(set(e['patient_id'] for e in events))} patients")
+    print(f"Validation: {validation.get('summary', 'N/A')}")
+    
+    if validation.get("recommendations"):
+        print("\nRecommendations:")
+        for rec in validation["recommendations"]:
+            print(f"  - {rec}")
+    
+    lwbs_count = sum(1 for e in events if e["event_type"] == "lwbs")
+    total_patients = len(set(e['patient_id'] for e in events))
+    print(f"\nStatistics:")
+    print(f"  Total patients: {total_patients}")
+    print(f"  LWBS rate: {lwbs_count / total_patients * 100:.1f}% (target: 1.1-1.8%)")
+    print(f"  Total events: {len(events)}")
+

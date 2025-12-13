@@ -17,3 +17,4 @@ export default function KPICard({ title, value, threshold, current, trend }) {
   )
 }
 
+

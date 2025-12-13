@@ -1,8 +1,11 @@
 """
 Correlation Analysis Engine for ED Metrics.
 
-Identifies correlations between patient types, conditions, and outcomes.
+Identifies correlations between patient types, conditions, and outcomes using Polars for fast computation.
 Example: "17% psych + 23% abdominal weekend → +12% LWBS correlation"
+
+Uses Polars (if available) for high-performance correlation calculations on large datasets.
+Falls back to pandas/numpy for compatibility.
 """
 import logging
 from typing import List, Dict, Any, Optional
@@ -14,6 +17,15 @@ from scipy import stats
 from app.data.storage import get_events, get_kpis
 
 logger = logging.getLogger(__name__)
+
+# Try to import Polars for fast correlation calculations
+try:
+    import polars as pl
+    POLARS_AVAILABLE = True
+    logger.debug("Polars available for fast correlation calculations")
+except ImportError:
+    POLARS_AVAILABLE = False
+    logger.debug("Polars not available, using pandas/numpy for correlations")
 
 
 class CorrelationAnalyzer:
@@ -146,7 +158,12 @@ class CorrelationAnalyzer:
         outcome_col: str,
         predictor_cols: List[str]
     ) -> Dict[str, Any]:
-        """Calculate correlations between predictors and outcome."""
+        """
+        Calculate correlations between predictors and outcome.
+        
+        Uses Polars for fast computation if available, falls back to pandas/scipy.
+        Returns correlation coefficients, p-values, confidence intervals, and interpretations.
+        """
         if outcome_col not in merged_df.columns:
             return {}
         
@@ -156,20 +173,69 @@ class CorrelationAnalyzer:
             if pred_col not in merged_df.columns:
                 continue
             
-            # Calculate Pearson correlation
-            valid_data = merged_df[[pred_col, outcome_col]].dropna()
-            if len(valid_data) < 5:
-                continue
-            
-            corr, p_value = stats.pearsonr(valid_data[pred_col], valid_data[outcome_col])
+            # Use Polars for fast correlation if available
+            if POLARS_AVAILABLE:
+                try:
+                    # Convert to Polars DataFrame
+                    pl_df = pl.from_pandas(merged_df[[pred_col, outcome_col]].dropna())
+                    if len(pl_df) < 5:
+                        continue
+                    
+                    # Calculate Pearson correlation with Polars
+                    corr_result = pl_df.select(pl.corr(pred_col, outcome_col))
+                    corr = corr_result.item() if corr_result is not None else None
+                    
+                    # Calculate p-value using scipy (still needed for statistical significance)
+                    if corr is not None and not np.isnan(corr):
+                        # Get data for p-value calculation
+                        valid_data = merged_df[[pred_col, outcome_col]].dropna()
+                        if len(valid_data) >= 5:
+                            _, p_value = stats.pearsonr(valid_data[pred_col], valid_data[outcome_col])
+                        else:
+                            p_value = 1.0
+                    else:
+                        continue
+                except Exception as e:
+                    logger.debug(f"Polars correlation failed for {pred_col}, using pandas: {e}")
+                    # Fallback to pandas/scipy
+                    valid_data = merged_df[[pred_col, outcome_col]].dropna()
+                    if len(valid_data) < 5:
+                        continue
+                    corr, p_value = stats.pearsonr(valid_data[pred_col], valid_data[outcome_col])
+            else:
+                # Fallback to pandas/scipy
+                valid_data = merged_df[[pred_col, outcome_col]].dropna()
+                if len(valid_data) < 5:
+                    continue
+                corr, p_value = stats.pearsonr(valid_data[pred_col], valid_data[outcome_col])
             
             if not np.isnan(corr) and not np.isnan(p_value):
+                # Calculate 95% confidence interval using Fisher transformation
+                ci_lower, ci_upper = None, None
+                if len(valid_data) > 30 and abs(corr) < 0.99:
+                    try:
+                        import math
+                        z = 1.96  # 95% confidence
+                        z_corr = 0.5 * math.log((1 + corr) / (1 - corr))
+                        se = 1.0 / math.sqrt(len(valid_data) - 3)
+                        z_lower = z_corr - z * se
+                        z_upper = z_corr + z * se
+                        ci_lower = (math.exp(2 * z_lower) - 1) / (math.exp(2 * z_lower) + 1)
+                        ci_upper = (math.exp(2 * z_upper) - 1) / (math.exp(2 * z_upper) + 1)
+                        ci_lower = max(-1.0, min(1.0, ci_lower))
+                        ci_upper = max(-1.0, min(1.0, ci_upper))
+                    except Exception:
+                        pass
+                
                 correlations[pred_col] = {
                     'correlation': float(corr),
                     'p_value': float(p_value),
+                    'ci_lower_95': ci_lower,
+                    'ci_upper_95': ci_upper,
                     'significant': p_value < 0.05,
                     'effect_size': abs(corr),
-                    'interpretation': self._interpret_correlation(corr, p_value, pred_col, outcome_col)
+                    'interpretation': self._interpret_correlation(corr, p_value, pred_col, outcome_col),
+                    'method': 'Polars' if POLARS_AVAILABLE else 'Pandas/NumPy'
                 }
         
         return correlations
@@ -259,3 +325,4 @@ class CorrelationAnalyzer:
         sig = "significant" if p_value < 0.05 else "not significant"
         
         return f"{pred_name} {strength}ly {direction} {outcome_name} (r={corr:.2f}, p={p_value:.3f}, {sig})"
+

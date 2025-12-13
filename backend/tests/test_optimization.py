@@ -40,3 +40,4 @@ async def test_optimization_basic():
         assert suggestions[0].priority > 0
         assert suggestions[0].expected_impact is not None
 
+

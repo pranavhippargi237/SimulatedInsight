@@ -39,3 +39,4 @@ async def process_intelligent_query(query: NLPQuery):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Query processing failed: {str(e)}")
 
+

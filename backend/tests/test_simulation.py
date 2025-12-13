@@ -56,3 +56,4 @@ async def test_simulation_multiple_iterations():
     assert "dtd" in result.predicted_metrics
     assert "los" in result.predicted_metrics
 
+

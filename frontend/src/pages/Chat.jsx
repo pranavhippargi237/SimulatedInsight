@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { chat, ingestCSV, clearConversation, getMetrics } from '../services/api'
+import { chat, chatStream, ingestCSV, clearConversation, getMetrics, healthCheck } from '../services/api'
 import SimulationResult from '../components/SimulationResult'
 import ActionPlan from '../components/ActionPlan'
 import BottleneckReport from '../components/BottleneckReport'
@@ -45,6 +45,34 @@ export default function Chat() {
     const loadInitialData = async () => {
       try {
         setInitialLoading(true)
+        
+        // First check if backend is available
+        console.log('[Chat] 🔍 Checking backend health...')
+        const healthCheckStart = Date.now()
+        try {
+          const healthResult = await healthCheck()
+          const healthCheckDuration = Date.now() - healthCheckStart
+          console.log(`[Chat] ✅ Backend is online (health check took ${healthCheckDuration}ms)`, healthResult)
+        } catch (healthError) {
+          const healthCheckDuration = Date.now() - healthCheckStart
+          console.error(`[Chat] ❌ Backend health check failed after ${healthCheckDuration}ms:`, healthError)
+          console.error('[Chat] Error details:', {
+            code: healthError.code,
+            message: healthError.message,
+            response: healthError.response?.data,
+            status: healthError.response?.status
+          })
+          setInitialLoading(false)
+          // Show user-friendly message
+          const errorMessage = {
+            role: 'assistant',
+            content: '⚠️ Backend server is not responding. Please ensure the backend is running at http://localhost:8000. Check the backend logs for errors.',
+            error: true,
+          }
+          setMessages((prev) => [...prev, errorMessage])
+          return
+        }
+        
         const metrics = await getMetrics(24)
         // Metrics API returns data in current_metrics nested object
         const currentMetricsData = metrics?.current_metrics || metrics
@@ -68,6 +96,10 @@ export default function Chat() {
         }
       } catch (error) {
         console.error('Failed to load initial data:', error)
+        // Don't show error to user if it's just a timeout - backend may be starting up
+        if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+          console.warn('⚠️ Backend request timed out - server may be starting up or slow. Retrying...')
+        }
         setJustUploaded(false)
       } finally {
         setInitialLoading(false)
@@ -85,66 +117,142 @@ export default function Chat() {
     setInput('')
     setLoading(true)
 
+    // Create a streaming message that will be updated as chunks arrive
+    const streamingMessageId = Date.now()
+    const initialStreamingMessage = {
+      id: streamingMessageId,
+      role: 'assistant',
+      content: '',
+      isStreaming: true
+    }
+    setMessages((prev) => [...prev, initialStreamingMessage])
+
     try {
-      // Use conversational AI endpoint
-      const response = await chat(query, conversationId)
-      
-      // Extract results
-      const results = response.results || {}
-      
-      // Set simulation result if available
-      if (results.simulation) {
-        setSimulationResult(results.simulation)
-      } else {
-        setSimulationResult(null)
-      }
-      
-      // Set action plan if available
-      if (results.action_plan) {
-        setActionPlan(results.action_plan)
-      } else {
-        setActionPlan(null)
-      }
-      
-      // Set bottlenecks if available
-      if (results.bottlenecks) {
-        setBottlenecks(results.bottlenecks)
-      } else {
-        setBottlenecks(null)
-      }
-      
-      // Set current metrics if available
-      if (results.current_metrics) {
-        setCurrentMetrics(results.current_metrics)
-      } else {
-        setCurrentMetrics(null)
-      }
-      
-      // Set deep analysis if available
-      if (results.deep_analysis) {
-        setDeepAnalysis(results.deep_analysis)
-      } else {
-        setDeepAnalysis(null)
-      }
-      
-      // Add assistant response
-      const assistantMessage = {
-        role: 'assistant',
-        content: response.response || "I've processed your query. Here are the results:",
-        data: response,
-        isActionPlan: !!results.action_plan,
-        isFollowUp: response.is_follow_up || false
-      }
-      setMessages((prev) => [...prev, assistantMessage])
+      // Use streaming endpoint
+      await chatStream(
+        query,
+        conversationId,
+        // onChunk - update the streaming message with each chunk
+        (chunk) => {
+          setMessages((prev) => 
+            prev.map((msg) => 
+              msg.id === streamingMessageId
+                ? { ...msg, content: msg.content + chunk }
+                : msg
+            )
+          )
+        },
+        // onResults - handle results
+        (results) => {
+          // Set simulation result if available
+          if (results.simulation) {
+            setSimulationResult(results.simulation)
+          } else {
+            setSimulationResult(null)
+          }
+          
+          // Set action plan if available
+          if (results.action_plan) {
+            setActionPlan(results.action_plan)
+          } else {
+            setActionPlan(null)
+          }
+          
+          // Set bottlenecks if available
+          if (results.bottlenecks) {
+            setBottlenecks(results.bottlenecks)
+          } else {
+            setBottlenecks(null)
+          }
+          
+          // Set current metrics if available
+          if (results.current_metrics) {
+            setCurrentMetrics(results.current_metrics)
+          } else {
+            setCurrentMetrics(null)
+          }
+          
+          // Set deep analysis if available
+          if (results.deep_analysis) {
+            setDeepAnalysis(results.deep_analysis)
+          } else {
+            setDeepAnalysis(null)
+          }
+        },
+        // onDone - mark streaming as complete
+        () => {
+          setMessages((prev) => 
+            prev.map((msg) => 
+              msg.id === streamingMessageId
+                ? { ...msg, isStreaming: false }
+                : msg
+            )
+          )
+          setLoading(false)
+        },
+        // onError - handle errors
+        (errorMessage) => {
+          setMessages((prev) => 
+            prev.map((msg) => 
+              msg.id === streamingMessageId
+                ? { ...msg, content: `Error: ${errorMessage}`, error: true, isStreaming: false }
+                : msg
+            )
+          )
+          setLoading(false)
+        }
+      )
     } catch (error) {
-      const errorMessage = {
-        role: 'assistant',
-        content: `Error: ${error.response?.data?.detail || error.message}`,
-        error: true,
+      // Fallback to non-streaming if streaming fails
+      try {
+        const response = await chat(query, conversationId)
+        const results = response.results || {}
+        
+        if (results.simulation) setSimulationResult(results.simulation)
+        else setSimulationResult(null)
+        
+        if (results.action_plan) setActionPlan(results.action_plan)
+        else setActionPlan(null)
+        
+        if (results.bottlenecks) setBottlenecks(results.bottlenecks)
+        else setBottlenecks(null)
+        
+        if (results.current_metrics) setCurrentMetrics(results.current_metrics)
+        else setCurrentMetrics(null)
+        
+        if (results.deep_analysis) setDeepAnalysis(results.deep_analysis)
+        else setDeepAnalysis(null)
+        
+        setMessages((prev) => 
+          prev.map((msg) => 
+            msg.id === streamingMessageId
+              ? { 
+                  ...msg, 
+                  content: response.response || "I've processed your query. Here are the results:",
+                  isStreaming: false,
+                  data: response,
+                  isActionPlan: !!results.action_plan,
+                  isFollowUp: response.is_follow_up || false
+                }
+              : msg
+          )
+        )
+      } catch (fallbackError) {
+        setMessages((prev) => 
+          prev.map((msg) => 
+            msg.id === streamingMessageId
+              ? { 
+                  ...msg, 
+                  content: `Error: ${fallbackError.response?.data?.detail || fallbackError.message}`,
+                  error: true,
+                  isStreaming: false
+                }
+              : msg
+          )
+        )
+      } finally {
+        setLoading(false)
       }
-      setMessages((prev) => [...prev, errorMessage])
-    } finally {
-      setLoading(false)
     }
   }
 
@@ -167,35 +275,50 @@ export default function Chat() {
   }
 
   const handleFileUpload = async (file) => {
+    const uploadStart = Date.now()
+    console.log(`[Chat] 📤 Starting file upload: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`)
+    
     try {
       setLoading(true)
       
-      // Add timeout for upload
-      const uploadPromise = ingestCSV(file, true) // Reset existing data before upload
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('Upload timeout after 60 seconds')), 60000)
-      )
-      
-      const result = await Promise.race([uploadPromise, timeoutPromise])
+      // Upload with timeout handled by API (120 seconds)
+      console.log('[Chat] 📥 Calling ingestCSV API...')
+      const result = await ingestCSV(file, true) // Reset existing data before upload
+      const uploadDuration = Date.now() - uploadStart
+      console.log(`[Chat] ✅ File upload completed in ${uploadDuration}ms:`, result)
       
       // Calculate KPIs after successful ingestion (with timeout)
       let kpiMessage = ''
       try {
-        const kpiPromise = fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000/api'}/ingest/calculate-kpis?window_hours=72`, {
-          method: 'POST'
-        })
-        const kpiTimeout = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('KPI calculation timeout')), 30000)
-        )
+        console.log('[Chat] 📊 Starting KPI calculation...')
+        const kpiStart = Date.now()
+        // Use longer timeout for KPI calculation (60 seconds)
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 60000)
         
-        const kpiResult = await Promise.race([kpiPromise, kpiTimeout])
+        const kpiResult = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000/api'}/ingest/calculate-kpis?window_hours=72`, {
+          method: 'POST',
+          signal: controller.signal
+        })
+        
+        clearTimeout(timeoutId)
         if (kpiResult.ok) {
           const kpiData = await kpiResult.json()
+          const kpiDuration = Date.now() - kpiStart
+          console.log(`[Chat] ✅ KPI calculation completed in ${kpiDuration}ms:`, kpiData)
           kpiMessage = ` Calculated ${kpiData.kpis_calculated || 0} KPI records.`
+        } else {
+          console.warn(`[Chat] ⚠️ KPI calculation returned status ${kpiResult.status}`)
         }
       } catch (kpiError) {
-        console.warn('KPI calculation failed:', kpiError)
-        kpiMessage = ' (KPI calculation skipped - you can calculate KPIs later)'
+        const kpiDuration = Date.now() - Date.now()
+        if (kpiError.name === 'AbortError') {
+          console.warn(`[Chat] ⏱️ KPI calculation timed out after 60 seconds`)
+          kpiMessage = ' (KPI calculation timed out - you can calculate KPIs later)'
+        } else {
+          console.warn(`[Chat] ❌ KPI calculation failed:`, kpiError)
+          kpiMessage = ' (KPI calculation skipped - you can calculate KPIs later)'
+        }
       }
       
       // After upload, reload data and auto-query for bottlenecks
@@ -251,10 +374,32 @@ export default function Chat() {
       }
       setMessages((prev) => [...prev, message])
     } catch (error) {
-      console.error('Upload error:', error)
+      const uploadDuration = Date.now() - uploadStart
+      console.error(`[Chat] ❌ Upload error after ${uploadDuration}ms:`, error)
+      console.error('[Chat] Error details:', {
+        code: error.code,
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        config: {
+          url: error.config?.url,
+          method: error.config?.method,
+          timeout: error.config?.timeout
+        }
+      })
+      
+      let errorMsg = error.response?.data?.detail || error.message || 'Unknown error'
+      
+      // Provide more helpful error messages
+      if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+        errorMsg = 'Upload timed out after 2 minutes. The file may be too large, the server is slow, or the backend may not be running. Please:\n1. Check if the backend server is running (http://localhost:8000/api/health)\n2. Try a smaller file\n3. Check backend logs for errors'
+      } else if (error.code === 'ERR_NETWORK' || error.code === 'ERR_CONNECTION_RESET') {
+        errorMsg = 'Network error: Unable to connect to backend server. Please ensure the server is running at http://localhost:8000'
+      }
+      
       const errorMessage = {
         role: 'assistant',
-        content: `❌ Upload failed: ${error.response?.data?.detail || error.message || 'Unknown error'}. Please check the file format and try again.`,
+        content: `❌ Upload failed: ${errorMsg}. Please check the file format and try again.`,
         error: true,
       }
       setMessages((prev) => [...prev, errorMessage])
@@ -302,7 +447,7 @@ export default function Chat() {
 
         {messages.map((msg, idx) => (
           <div
-            key={idx}
+            key={msg.id || idx}
             className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
           >
             <div
@@ -314,7 +459,12 @@ export default function Chat() {
                   : 'bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white'
               }`}
             >
-              <div className="whitespace-pre-line">{msg.content}</div>
+              <div className="whitespace-pre-line">
+                {msg.content}
+                {msg.isStreaming && (
+                  <span className="inline-block w-2 h-5 ml-1 bg-gray-500 dark:bg-gray-400 animate-pulse">|</span>
+                )}
+              </div>
               {msg.hasLink && (
                 <div className="mt-3">
                   <Link

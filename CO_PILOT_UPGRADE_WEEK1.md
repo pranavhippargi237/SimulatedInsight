@@ -115,3 +115,4 @@
 - ✅ Interactive causal viz (30 min audit → 2 min click)
 
 **Remaining Gap**: Predictive forecasting and equity stratification needed for 8.5+ score
+
