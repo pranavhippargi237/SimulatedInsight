@@ -21,8 +21,13 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY backend/ ./backend/
 WORKDIR /app/backend
 
-# Verify structure and set PYTHONPATH
-RUN ls -la app/ && ls -la app/data/ 2>/dev/null || (echo "ERROR: app/data not found!" && find . -name "data" -type d)
+# Debug: Verify app/data exists and list contents
+RUN echo "=== Checking app structure ===" && \
+    ls -la app/ && \
+    echo "=== Checking app/data ===" && \
+    ls -la app/data/ 2>/dev/null && \
+    echo "=== app/data Python files ===" && \
+    ls -la app/data/*.py 2>/dev/null || (echo "ERROR: app/data/*.py not found!" && find . -name "*.py" -path "*/data/*" | head -5)
 
 # Set PYTHONPATH so Python can find the app module
 ENV PYTHONPATH=/app/backend
