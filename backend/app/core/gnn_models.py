@@ -476,8 +476,6 @@ class GNNResourceOptimizer:
         
         return suggestions
 
-Graph Neural Networks (GNNs) for ED patient flow and resource optimization.
-
 Phase 2 Upgrade: Implements GNNs for:
 - Patient flow modeling (graph structure)
 - Resource network optimization
