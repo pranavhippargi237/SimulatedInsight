@@ -10,26 +10,25 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first (for better Docker layer caching)
-# Try to find requirements.txt in current context or backend/
-COPY requirements.txt* ./requirements.txt* backend/requirements.txt* ./
-RUN if [ -f requirements.txt ]; then \
-        pip install --no-cache-dir --upgrade pip && \
-        pip install --no-cache-dir -r requirements.txt; \
-    elif [ -f backend/requirements.txt ]; then \
-        pip install --no-cache-dir --upgrade pip && \
-        pip install --no-cache-dir -r backend/requirements.txt; \
-    else \
-        echo "ERROR: requirements.txt not found. Looking for:" && \
-        ls -la && ls -la backend/ 2>/dev/null || true && \
-        exit 1; \
-    fi
+# dockerContext is ./backend, so requirements.txt is in current dir
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code
-COPY backend/ ./backend/
-WORKDIR /app/backend
+# Copy backend code (dockerContext is ./backend, so we copy current dir)
+COPY . ./
+WORKDIR /app
 
-# Create data directory
-RUN mkdir -p /app/backend/data
+# Debug: Verify app/data exists
+RUN echo "=== Checking app structure ===" && \
+    ls -la app/ 2>/dev/null && \
+    echo "=== Checking app/data ===" && \
+    ls -la app/data/ 2>/dev/null && \
+    echo "=== app/data Python files ===" && \
+    ls -la app/data/*.py 2>/dev/null || (echo "ERROR: app/data/*.py not found!" && find . -name "*.py" -path "*/data/*" | head -5)
+
+# Set PYTHONPATH so Python can find the app module
+ENV PYTHONPATH=/app
 
 # Expose port (Railway sets PORT env var)
 EXPOSE ${PORT:-8000}
