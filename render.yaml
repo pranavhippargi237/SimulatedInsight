@@ -2,29 +2,30 @@ services:
   - type: web
     name: ed-backend
     env: docker
-    dockerfilePath: ./backend/Dockerfile.prod
+    dockerfilePath: ./backend/Dockerfile.railway
     dockerContext: ./backend
     envVars:
       - key: OPENAI_API_KEY
         sync: false
       - key: CORS_ORIGINS
         value: https://ed-frontend.onrender.com
-      - key: ENVIRONMENT
-        value: production
+      - key: PORT
+        value: 8000
     healthCheckPath: /api/health
+    plan: starter  # Free tier (512MB RAM) - upgrade to standard (2GB) if needed
+    # Note: PyTorch requires more memory. Consider upgrading plan or making ML deps optional
 
   - type: web
     name: ed-frontend
-    env: docker
-    dockerfilePath: ./frontend/Dockerfile.prod
-    dockerContext: ./frontend
+    env: static
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./frontend/dist
     envVars:
       - key: VITE_API_URL
         fromService:
           name: ed-backend
           type: web
           property: host
-          value: https://ed-backend.onrender.com/api
     routes:
       - type: rewrite
         source: /*
