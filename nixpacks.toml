@@ -1,11 +1,11 @@
 # Root-level nixpacks config that points to backend
 [phases.setup]
-nixPkgs = ["python311", "pip"]
+nixPkgs = ["python311"]
 
 [phases.install]
 cmds = [
-  "cd backend && pip install --upgrade pip",
-  "cd backend && pip install -r requirements.txt"
+  "cd backend && python -m pip install --upgrade pip",
+  "cd backend && python -m pip install -r requirements.txt"
 ]
 
 [start]
