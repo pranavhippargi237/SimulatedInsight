@@ -21,11 +21,11 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY backend/ ./backend/
 WORKDIR /app/backend
 
-# Create data directory
-RUN mkdir -p /app/backend/data
+# Verify structure and set PYTHONPATH
+RUN ls -la app/ && ls -la app/data/ 2>/dev/null || (echo "ERROR: app/data not found!" && find . -name "data" -type d)
 
 # Set PYTHONPATH so Python can find the app module
-ENV PYTHONPATH=/app/backend:$PYTHONPATH
+ENV PYTHONPATH=/app/backend
 
 # Expose port (Render sets PORT env var)
 EXPOSE ${PORT:-8000}
