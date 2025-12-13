@@ -24,6 +24,9 @@ WORKDIR /app/backend
 # Create data directory
 RUN mkdir -p /app/backend/data
 
+# Set PYTHONPATH so Python can find the app module
+ENV PYTHONPATH=/app/backend
+
 # Expose port (Render sets PORT env var)
 EXPOSE ${PORT:-8000}
 
